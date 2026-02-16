@@ -1,0 +1,13 @@
+{
+	"folders": [
+		{
+			"path": ".."
+		},
+		{
+			"path": "../worker"
+		}
+	],
+	"settings": {
+		"chatgpt.openOnStartup": true
+	}
+}

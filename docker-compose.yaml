@@ -1,0 +1,59 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: calendar_postgres
+    environment:
+      POSTGRES_USER: calendar
+      POSTGRES_PASSWORD: calendarpass
+      POSTGRES_DB: calendardb
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U calendar"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  worker:
+    build:
+      context: ./worker
+      dockerfile: Dockerfile
+    container_name: calendar_worker
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://calendar:calendarpass@postgres:5432/calendardb
+      DB_HOST: postgres
+      DB_NAME: calendardb
+      DB_USER: calendar
+      DB_PASSWORD: calendarpass
+      USER_ID: roque
+      SOURCE_ICS_URL: webcal://crewmember-ics-from-iflight-calendar-public-link
+      INTERVAL_SECONDS: 600
+      OUT_DIR: /var/www/calendars
+    volumes:
+      - ./worker:/app
+      - calendar_output:/var/www/calendars
+    restart: unless-stopped
+
+  nginx:
+    image: nginx:alpine
+    container_name: calendar_nginx
+    depends_on:
+      - worker
+    volumes:
+      - calendar_output:/var/www/calendars:ro
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "80:80"
+      - "443:443"
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  calendar_output:

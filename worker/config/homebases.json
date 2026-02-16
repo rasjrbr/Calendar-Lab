@@ -1,0 +1,65 @@
+{
+  "FOR": {
+    "airport_name": "Pinto Martins – Fortaleza International Airport",
+    "city": "Fortaleza",
+    "state": "CE",
+    "country": "Brazil",
+    "address": "Av. Senador Carlos Jereissati, 3000 - Serrinha, Fortaleza - CE, 60741-900, Brazil"
+  },
+  "GRU": {
+    "airport_name": "São Paulo/Guarulhos – Governor André Franco Montoro International Airport",
+    "city": "Guarulhos",
+    "state": "SP",
+    "country": "Brazil",
+    "address": "Rod. Hélio Smidt, s/nº - Aeroporto, Guarulhos - SP, 07190-100, Brazil"
+  },
+  "CGH": {
+    "airport_name": "São Paulo/Congonhas – Deputado Freitas Nobre Airport",
+    "city": "São Paulo",
+    "state": "SP",
+    "country": "Brazil",
+    "address": "Av. Washington Luís, s/nº - Vila Congonhas, São Paulo - SP, 04626-911, Brazil"
+  },
+  "SDU": {
+    "airport_name": "Santos Dumont Airport",
+    "city": "Rio de Janeiro",
+    "state": "RJ",
+    "country": "Brazil",
+    "address": "Praça Sen. Salgado Filho, s/n - Centro, Rio de Janeiro - RJ, 20021-340, Brazil"
+  },
+  "GIG": {
+    "airport_name": "Rio de Janeiro/Galeão – Antonio Carlos Jobim International Airport",
+    "city": "Rio de Janeiro",
+    "state": "RJ",
+    "country": "Brazil",
+    "address": "Av. Vinte de Janeiro, s/nº - Ilha do Governador, Rio de Janeiro - RJ, 21941-900, Brazil"
+  },
+  "POA": {
+    "airport_name": "Salgado Filho International Airport",
+    "city": "Porto Alegre",
+    "state": "RS",
+    "country": "Brazil",
+    "address": "Av. Severo Dullius, 90.010 - Anchieta, Porto Alegre - RS, 90200-310, Brazil"
+  },
+  "BSB": {
+    "airport_name": "Brasília – Presidente Juscelino Kubitschek International Airport",
+    "city": "Brasília",
+    "state": "DF",
+    "country": "Brazil",
+    "address": "Lago Sul, Brasília - DF, 71608-900, Brazil"
+  },
+  "CWB": {
+    "airport_name": "Afonso Pena International Airport",
+    "city": "São José dos Pinhais",
+    "state": "PR",
+    "country": "Brazil",
+    "address": "Av. Rocha Pombo, s/n - Águas Belas, São José dos Pinhais - PR, 83010-900, Brazil"
+  },
+  "SSA": {
+    "airport_name": "Deputado Luís Eduardo Magalhães International Airport",
+    "city": "Salvador",
+    "state": "BA",
+    "country": "Brazil",
+    "address": "Av. Tancredo Neves, s/n - Imbuí, Salvador - BA, 41255-000, Brazil"
+  }
+}
