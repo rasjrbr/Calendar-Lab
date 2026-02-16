@@ -20,6 +20,7 @@ from zoneinfo import ZoneInfo
 
 from utils.db_utils import get_connection
 from utils.logging_utils import setup_logging
+from utils.notes_utils import ROQUESCRIPT_INFO_MARKER, append_roquescript_block, build_roquescript_block
 from utils.timezone_utils import now_utc
 
 logger = setup_logging(__name__)
@@ -87,6 +88,91 @@ def detect_leg(title: str) -> tuple[bool, bool, bool]:
     return True, is_international, is_hybrid_9
 
 
+def extract_original_notes(notes_original: str | None, notes: str | None) -> str | None:
+    """Prefer raw source notes and fallback to notes without roquescript metadata."""
+    if notes_original and notes_original.strip():
+        return notes_original.strip()
+
+    if not notes:
+        return None
+
+    base_notes = notes
+    if ROQUESCRIPT_INFO_MARKER in base_notes:
+        base_notes = base_notes.split(ROQUESCRIPT_INFO_MARKER, 1)[0]
+
+    base_notes = base_notes.strip()
+    return base_notes or None
+
+
+def build_dtl_notes(base_notes: str | None, duty_scope: str) -> str:
+    """Compose notes with original text plus a standardized roquescript creation block."""
+    block = build_roquescript_block(
+        "#roquescript #roquescript-created",
+        [f"Duty Limit Added, {duty_scope}"],
+        now_utc().isoformat(),
+    )
+    return append_roquescript_block(base_notes, block)
+
+
+def intervals_overlap(start_a: datetime, end_a: datetime, start_b: datetime, end_b: datetime) -> bool:
+    """Return True when two [start, end) windows overlap."""
+    return start_a < end_b and end_a > start_b
+
+
+def load_standby_windows(cur, user_id: str) -> list[tuple[str, datetime, datetime]]:
+    """Load Reserva/Sobreaviso windows that invalidate DTL processing."""
+    cur.execute(
+        """
+        SELECT source_uid, start_utc, end_utc
+        FROM processed_events
+        WHERE user_id = %s
+          AND is_synthetic = FALSE
+          AND (
+                clean_title LIKE 'Reserva%%'
+             OR clean_title = 'Sobreaviso'
+             OR event_type IN ('RESERVA', 'SOBREAVISO')
+          )
+        """,
+        (user_id,),
+    )
+    return cur.fetchall()
+
+
+def apresentacao_overlaps_standby(
+    ap_source_uid: str,
+    ap_start_utc: datetime,
+    ap_end_utc: datetime,
+    standby_windows: list[tuple[str, datetime, datetime]],
+) -> bool:
+    """Return True if Apresentação overlaps any Reserva/Sobreaviso window."""
+    for standby_uid, standby_start, standby_end in standby_windows:
+        if standby_uid == ap_source_uid:
+            continue
+        if intervals_overlap(ap_start_utc, ap_end_utc, standby_start, standby_end):
+            return True
+    return False
+
+
+def clear_dtl_markers(cur, user_id: str, ap_source_uid: str) -> int:
+    """Delete all synthetic DTL markers linked to one Apresentação source UID."""
+    marker_uids = [
+        f"{ap_source_uid}-dtl-final",
+        f"{ap_source_uid}-dtl-cut-d",
+        f"{ap_source_uid}-dtl-cut-i",
+        f"{ap_source_uid}-dtl-sc-ext-1h",
+        f"{ap_source_uid}-dtl-sc-ext-cut",
+    ]
+    cur.execute(
+        """
+        DELETE FROM processed_events
+        WHERE user_id = %s
+          AND source_uid = ANY(%s)
+        """,
+        (user_id, marker_uids),
+    )
+    return cur.rowcount
+
+
 def upsert_marker_event(
     cur,
     user_id: str,
@@ -95,6 +181,7 @@ def upsert_marker_event(
     start_utc: datetime,
     end_utc: datetime,
     notes: str,
+    notes_original: str | None,
 ):
     """Insert/update a synthetic marker event in processed_events."""
     cur.execute(
@@ -112,6 +199,7 @@ def upsert_marker_event(
             start_utc = EXCLUDED.start_utc,
             end_utc = EXCLUDED.end_utc,
             notes = EXCLUDED.notes,
+            notes_original = EXCLUDED.notes_original,
             event_url = EXCLUDED.event_url,
             modifications = EXCLUDED.modifications,
             tags = EXCLUDED.tags,
@@ -127,24 +215,33 @@ def upsert_marker_event(
             start_utc,
             end_utc,
             notes,
-            None,
+            notes_original,
             None,
             True,
             json.dumps([{"rule": "dtl_singlecrew_marker", "at": now_utc().isoformat()}]),
-            json.dumps(["#roquescript-modified", "#synthetic", "#dtl-singlecrew"]),
+            json.dumps(["#roquescript-created", "#synthetic", "#dtl-singlecrew"]),
             now_utc().replace(tzinfo=None),
         ),
     )
 
 
-def process_apresentacao(cur, user_id: str, apresentacao_row) -> dict:
+def process_apresentacao(cur, user_id: str, apresentacao_row, standby_windows) -> dict:
     """
     Process one Apresentação event and create/update duty limit markers.
 
     Returns:
         stats dict for this event.
     """
-    proc_id, ap_source_uid, ap_start_utc, ap_end_utc = apresentacao_row
+    proc_id, ap_source_uid, ap_start_utc, ap_end_utc, ap_notes_original, ap_notes = apresentacao_row
+
+    if apresentacao_overlaps_standby(ap_source_uid, ap_start_utc, ap_end_utc, standby_windows):
+        cleared = clear_dtl_markers(cur, user_id, ap_source_uid)
+        return {
+            "skipped_no_checkout": 0,
+            "markers_upserted": 0,
+            "skipped_standby_overlap": 1,
+            "markers_cleared": cleared,
+        }
 
     checkout_uid = f"{ap_source_uid}-checkout-synthetic"
     cur.execute(
@@ -159,13 +256,10 @@ def process_apresentacao(cur, user_id: str, apresentacao_row) -> dict:
     checkout_row = cur.fetchone()
     fallback_window_end_utc = ap_start_utc + timedelta(hours=12)
     if checkout_row:
-        checkout_start_utc = checkout_row[0]
-        window_end_utc = checkout_start_utc
-        used_checkout_fallback = False
+        window_end_utc = checkout_row[0]
     else:
         # Fallback required by business rule: use up to 12h ahead from Apresentação.
         window_end_utc = fallback_window_end_utc
-        used_checkout_fallback = True
 
     cur.execute(
         """
@@ -210,12 +304,16 @@ def process_apresentacao(cur, user_id: str, apresentacao_row) -> dict:
         (user_id, cut_d_uid, cut_i_uid),
     )
 
+    base_notes = extract_original_notes(ap_notes_original, ap_notes)
+    if has_hybrid_9:
+        duty_scope = "Domestic/International"
+    elif is_international:
+        duty_scope = "International"
+    else:
+        duty_scope = "Domestic"
+    marker_notes = build_dtl_notes(base_notes, duty_scope)
+
     final_uid = f"{ap_source_uid}-dtl-final"
-    notes_base = (
-        f"[#dtl-singlecrew] legs={legs_count}, timeframe={timeframe_key}, bucket={col_key}, "
-        f"max_duty_hours={max_duty_hours}, is_international={is_international}, has_9xxx={has_hybrid_9}, "
-        f"used_checkout_fallback={used_checkout_fallback}"
-    )
     upsert_marker_event(
         cur=cur,
         user_id=user_id,
@@ -223,7 +321,8 @@ def process_apresentacao(cur, user_id: str, apresentacao_row) -> dict:
         title="Final de Jornada",
         start_utc=final_start_utc,
         end_utc=final_end_utc,
-        notes=notes_base,
+        notes=marker_notes,
+        notes_original=base_notes,
     )
 
     markers_upserted = 1
@@ -236,22 +335,50 @@ def process_apresentacao(cur, user_id: str, apresentacao_row) -> dict:
         cut_d_start = final_start_utc - timedelta(minutes=30)
         cut_i_start = final_start_utc - timedelta(minutes=45)
         upsert_marker_event(
-            cur, user_id, cut_d_uid, "Horário Corte (d)", cut_d_start, cut_d_start + timedelta(minutes=10), notes_base
+            cur,
+            user_id,
+            cut_d_uid,
+            "Horário Corte (d)",
+            cut_d_start,
+            cut_d_start + timedelta(minutes=10),
+            marker_notes,
+            base_notes,
         )
         upsert_marker_event(
-            cur, user_id, cut_i_uid, "Horário Corte (i)", cut_i_start, cut_i_start + timedelta(minutes=10), notes_base
+            cur,
+            user_id,
+            cut_i_uid,
+            "Horário Corte (i)",
+            cut_i_start,
+            cut_i_start + timedelta(minutes=10),
+            marker_notes,
+            base_notes,
         )
         markers_upserted += 2
     elif is_international:
         cut_i_start = final_start_utc - timedelta(minutes=45)
         upsert_marker_event(
-            cur, user_id, cut_i_uid, "Horário Corte (i)", cut_i_start, cut_i_start + timedelta(minutes=10), notes_base
+            cur,
+            user_id,
+            cut_i_uid,
+            "Horário Corte (i)",
+            cut_i_start,
+            cut_i_start + timedelta(minutes=10),
+            marker_notes,
+            base_notes,
         )
         markers_upserted += 1
     else:
         cut_d_start = final_start_utc - timedelta(minutes=30)
         upsert_marker_event(
-            cur, user_id, cut_d_uid, "Horário Corte (d)", cut_d_start, cut_d_start + timedelta(minutes=10), notes_base
+            cur,
+            user_id,
+            cut_d_uid,
+            "Horário Corte (d)",
+            cut_d_start,
+            cut_d_start + timedelta(minutes=10),
+            marker_notes,
+            base_notes,
         )
         markers_upserted += 1
 
@@ -269,6 +396,8 @@ def process_apresentacao(cur, user_id: str, apresentacao_row) -> dict:
     return {
         "skipped_no_checkout": 0 if checkout_row else 1,
         "markers_upserted": markers_upserted,
+        "skipped_standby_overlap": 0,
+        "markers_cleared": 0,
     }
 
 
@@ -286,7 +415,7 @@ def main():
         if args.source_uid:
             cur.execute(
                 """
-                SELECT id, source_uid, start_utc, end_utc
+                SELECT id, source_uid, start_utc, end_utc, notes_original, notes
                 FROM processed_events
                 WHERE user_id = %s
                   AND source_uid = %s
@@ -299,7 +428,7 @@ def main():
         else:
             cur.execute(
                 """
-                SELECT id, source_uid, start_utc, end_utc
+                SELECT id, source_uid, start_utc, end_utc, notes_original, notes
                 FROM processed_events
                 WHERE user_id = %s
                   AND is_synthetic = FALSE
@@ -311,14 +440,23 @@ def main():
 
         apresentacao_rows = cur.fetchall()
         logger.info(f"dtl-singlecrew: found {len(apresentacao_rows)} Apresentação events")
+        standby_windows = load_standby_windows(cur, args.user_id)
 
-        totals = {"processed": 0, "skipped_no_checkout": 0, "markers_upserted": 0}
+        totals = {
+            "processed": 0,
+            "skipped_no_checkout": 0,
+            "markers_upserted": 0,
+            "skipped_standby_overlap": 0,
+            "markers_cleared": 0,
+        }
 
         for row in apresentacao_rows:
-            stats = process_apresentacao(cur, args.user_id, row)
+            stats = process_apresentacao(cur, args.user_id, row, standby_windows)
             totals["processed"] += 1
             totals["skipped_no_checkout"] += stats["skipped_no_checkout"]
             totals["markers_upserted"] += stats["markers_upserted"]
+            totals["skipped_standby_overlap"] += stats["skipped_standby_overlap"]
+            totals["markers_cleared"] += stats["markers_cleared"]
 
         conn.commit()
         cur.close()
@@ -326,7 +464,9 @@ def main():
             "dtl-singlecrew complete: "
             f"processed={totals['processed']}, "
             f"skipped_no_checkout={totals['skipped_no_checkout']}, "
-            f"markers_upserted={totals['markers_upserted']}"
+            f"markers_upserted={totals['markers_upserted']}, "
+            f"skipped_standby_overlap={totals['skipped_standby_overlap']}, "
+            f"markers_cleared={totals['markers_cleared']}"
         )
     finally:
         if conn:

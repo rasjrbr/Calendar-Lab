@@ -26,6 +26,40 @@ def create_synthetic_checkout_uid(apresentacao_uid):
     return f"{apresentacao_uid}-checkout-synthetic"
 
 
+def intervals_overlap(start_a, end_a, start_b, end_b):
+    """Return True when two [start, end) intervals overlap."""
+    return start_a < end_b and end_a > start_b
+
+
+def load_standby_windows(cur, user_id):
+    """Load Reserva/Sobreaviso windows to block invalid Checkout creation."""
+    cur.execute(
+        """
+        SELECT source_uid, start_utc, end_utc
+        FROM processed_events
+        WHERE user_id = %s
+          AND is_synthetic = FALSE
+          AND (
+                clean_title LIKE 'Reserva%%'
+             OR clean_title = 'Sobreaviso'
+             OR event_type IN ('RESERVA', 'SOBREAVISO')
+          )
+        """,
+        (user_id,),
+    )
+    return cur.fetchall()
+
+
+def apresentacao_overlaps_standby(source_uid, start_utc, end_utc, standby_windows):
+    """Return True if Apresentação overlaps any Reserva/Sobreaviso window."""
+    for standby_uid, standby_start, standby_end in standby_windows:
+        if standby_uid == source_uid:
+            continue
+        if intervals_overlap(start_utc, end_utc, standby_start, standby_end):
+            return True
+    return False
+
+
 def process_apresentacoes(conn, user_id):
     """
     Main processing function for Apresentação events.
@@ -44,6 +78,7 @@ def process_apresentacoes(conn, user_id):
         "apresentacao_shortened": 0,
         "checkout_upserted": 0,
         "already_short": 0,
+        "skipped_standby_overlap": 0,
         "errors": 0
     }
     
@@ -72,9 +107,21 @@ def process_apresentacoes(conn, user_id):
     
     apresentacao_rows = cur.fetchall()
     logger.info(f"Found {len(apresentacao_rows)} Apresentação events to process")
+    standby_windows = load_standby_windows(cur, user_id)
     
     for proc_id, source_uid, start_utc, end_utc, notes, modifications_json, original_end_utc in apresentacao_rows:
         try:
+            checkout_uid = create_synthetic_checkout_uid(source_uid)
+            if apresentacao_overlaps_standby(source_uid, start_utc, end_utc, standby_windows):
+                # Defensive guard: Report Time overlapping Reserva/Sobreaviso must not create Checkout.
+                cur.execute(
+                    "DELETE FROM processed_events WHERE user_id = %s AND source_uid = %s",
+                    (user_id, checkout_uid),
+                )
+                stats["skipped_standby_overlap"] += 1
+                logger.info(f"Skipped Checkout for {source_uid}: overlaps Reserva/Sobreaviso")
+                continue
+
             # Guard against invalid source data
             if original_end_utc <= start_utc:
                 original_end_utc = end_utc
@@ -82,7 +129,6 @@ def process_apresentacoes(conn, user_id):
             # ===== STEP 1: Create/update Checkout event FIRST =====
             checkout_start_utc = original_end_utc + timedelta(minutes=1)
             checkout_end_utc = checkout_start_utc + timedelta(minutes=10)
-            checkout_uid = create_synthetic_checkout_uid(source_uid)
             
             creation_timestamp = now_utc().isoformat()
             checkout_modifications = [{
@@ -213,6 +259,7 @@ def process_apresentacoes(conn, user_id):
                 f"apresentacao_shortened={stats['apresentacao_shortened']}, "
                 f"checkout_upserted={stats['checkout_upserted']}, "
                 f"already_short={stats['already_short']}, "
+                f"skipped_standby_overlap={stats['skipped_standby_overlap']}, "
                 f"errors={stats['errors']}")
     
     return stats

@@ -32,6 +32,7 @@ CYCLE_ID = str(uuid.uuid4())
 DELETION_RULES = {
     "start_time_removed": lambda title: "Start Time:" in title,
 }
+STANDBY_KEYWORD_RE = re.compile(r"\b(ASB|HSB)\b", flags=re.IGNORECASE)
 
 RESERVA_URL = "https://docs.google.com/forms/d/e/1FAIpQLSfBlSTjRDYhVufIHQN5y3uiAqRy3jHRZFuTIpjnxBasFzt67Q/viewform"
 
@@ -82,6 +83,126 @@ def check_deletion_rules(title):
     return False, None
 
 
+def intervals_overlap(start_a, end_a, start_b, end_b):
+    """Return True when two [start, end) intervals overlap."""
+    return start_a < end_b and end_a > start_b
+
+
+def is_standby_summary(title):
+    """Return True for ASB/HSB entries from source calendar titles."""
+    if not title:
+        return False
+    return bool(STANDBY_KEYWORD_RE.search(title))
+
+
+def build_standby_windows(raw_rows):
+    """Collect standby windows (ASB/HSB) from raw rows for overlap checks."""
+    windows = []
+    for _raw_id, source_uid, start_utc, end_utc, summary, _description in raw_rows:
+        if is_standby_summary(summary or ""):
+            windows.append({
+                "source_uid": source_uid,
+                "start_utc": start_utc,
+                "end_utc": end_utc,
+            })
+    return windows
+
+
+def report_overlaps_standby(source_uid, start_utc, end_utc, standby_windows):
+    """Return True if this Report Time overlaps any ASB/HSB standby window."""
+    for standby in standby_windows:
+        if standby["source_uid"] == source_uid:
+            continue
+        if intervals_overlap(start_utc, end_utc, standby["start_utc"], standby["end_utc"]):
+            return True
+    return False
+
+
+def delete_event_and_related_synthetics(cur, user_id, source_uid):
+    """Delete one processed event and all known synthetic children derived from it."""
+    suffixes = (
+        "",
+        "-checkout-synthetic",
+        "-dtl-final",
+        "-dtl-cut-d",
+        "-dtl-cut-i",
+        "-dtl-sc-ext-1h",
+        "-dtl-sc-ext-cut",
+    )
+    uids = [f"{source_uid}{suffix}" for suffix in suffixes]
+    cur.execute(
+        """
+        DELETE FROM processed_events
+        WHERE user_id = %s
+          AND source_uid = ANY(%s)
+        """,
+        (user_id, uids),
+    )
+    return cur.rowcount
+
+
+def cleanup_standby_report_time_conflicts(cur, user_id):
+    """
+    Remove already-processed Report Time/Apresentação entries that overlap Reserva/Sobreaviso.
+    This keeps historical state clean even when no new raw events arrive.
+    """
+    cur.execute(
+        """
+        SELECT source_uid, start_utc, end_utc
+        FROM processed_events
+        WHERE user_id = %s
+          AND is_synthetic = FALSE
+          AND clean_title = 'Apresentação'
+        """,
+        (user_id,),
+    )
+    report_rows = cur.fetchall()
+
+    cur.execute(
+        """
+        SELECT source_uid, start_utc, end_utc
+        FROM processed_events
+        WHERE user_id = %s
+          AND is_synthetic = FALSE
+          AND (
+                clean_title LIKE 'Reserva%%'
+             OR clean_title = 'Sobreaviso'
+             OR event_type IN ('RESERVA', 'SOBREAVISO')
+          )
+        """,
+        (user_id,),
+    )
+    standby_rows = cur.fetchall()
+    if not report_rows or not standby_rows:
+        return 0
+
+    conflicted_report_uids = set()
+    for report_uid, report_start, report_end in report_rows:
+        for standby_uid, standby_start, standby_end in standby_rows:
+            if report_uid == standby_uid:
+                continue
+            if intervals_overlap(report_start, report_end, standby_start, standby_end):
+                conflicted_report_uids.add(report_uid)
+                break
+
+    removed = 0
+    for report_uid in conflicted_report_uids:
+        cur.execute(
+            """
+            UPDATE raw_events
+            SET skip_reason = %s, processed_flag = TRUE
+            WHERE user_id = %s AND source_uid = %s
+            """,
+            ("report_time_overlap_with_standby", user_id, report_uid),
+        )
+        delete_event_and_related_synthetics(cur, user_id, report_uid)
+        removed += 1
+
+    if removed:
+        logger.info(f"Removed {removed} Report Time/Apresentação events overlapping standby windows")
+    return removed
+
+
 def classify_event_type(title):
     """Classify event type based on title patterns."""
     if "Report Time" in title:
@@ -114,6 +235,7 @@ def apply_modifications(title, notes, event_type):
     # HSB -> Sobreaviso (single title, ignore any suffix like "at XXX")
     if "HSB" in new_title:
         new_title = "Sobreaviso"
+        special_flags["is_sobreaviso"] = True
         timestamp = now_utc().isoformat()
         modifications.append({
             "rule": "hsb_to_sobreaviso",
@@ -271,7 +393,8 @@ def process_raw_events(conn, user_id):
         "processed": 0,
         "deleted": 0,
         "skipped": 0,
-        "activities_pending": []
+        "activities_pending": [],
+        "deleted_standby_conflicts": 0,
     }
     
     # Load reference data
@@ -292,7 +415,8 @@ def process_raw_events(conn, user_id):
     raw_rows = cur.fetchall()
     stats["total_raw"] = len(raw_rows)
     logger.info(f"Found {len(raw_rows)} unprocessed raw events")
-    
+
+    standby_windows = build_standby_windows(raw_rows)
     processed_events_buffer = []  # For overlap detection
     
     for raw_id, source_uid, start_utc, end_utc, summary, description in raw_rows:
@@ -306,15 +430,7 @@ def process_raw_events(conn, user_id):
                     "UPDATE raw_events SET skip_reason = %s, processed_flag = TRUE WHERE id = %s",
                     (delete_reason, raw_id),
                 )
-                synthetic_uid = f"{source_uid}-checkout-synthetic"
-                cur.execute(
-                    """
-                    DELETE FROM processed_events
-                    WHERE user_id = %s
-                      AND (source_uid = %s OR source_uid = %s)
-                    """,
-                    (user_id, source_uid, synthetic_uid),
-                )
+                delete_event_and_related_synthetics(cur, user_id, source_uid)
                 stats["deleted"] += 1
                 logger.info(f"Event {source_uid}: DELETED ({delete_reason})")
                 continue
@@ -324,6 +440,16 @@ def process_raw_events(conn, user_id):
             
             # Phase 3: Check Report Time overlap with Activities
             if event_type == "REPORT_TIME":
+                if report_overlaps_standby(source_uid, start_utc, end_utc, standby_windows):
+                    cur.execute(
+                        "UPDATE raw_events SET skip_reason = %s, processed_flag = TRUE WHERE id = %s",
+                        ("report_time_overlap_with_standby", raw_id),
+                    )
+                    delete_event_and_related_synthetics(cur, user_id, source_uid)
+                    stats["deleted"] += 1
+                    logger.info(f"Event {source_uid}: DELETED (report_time_overlap_with_standby)")
+                    continue
+
                 temp_event = {
                     "start_utc": start_utc,
                     "end_utc": end_utc,
@@ -335,15 +461,7 @@ def process_raw_events(conn, user_id):
                         "UPDATE raw_events SET skip_reason = %s, processed_flag = TRUE WHERE id = %s",
                         ("report_time_overlap_with_activity", raw_id),
                     )
-                    synthetic_uid = f"{source_uid}-checkout-synthetic"
-                    cur.execute(
-                        """
-                        DELETE FROM processed_events
-                        WHERE user_id = %s
-                          AND (source_uid = %s OR source_uid = %s)
-                        """,
-                        (user_id, source_uid, synthetic_uid),
-                    )
+                    delete_event_and_related_synthetics(cur, user_id, source_uid)
                     stats["deleted"] += 1
                     logger.info(f"Event {source_uid}: DELETED (report_time_overlap_with_activity)")
                     continue
@@ -361,6 +479,8 @@ def process_raw_events(conn, user_id):
 
             if special_flags.get("is_reserva"):
                 event_type = "RESERVA"
+            if special_flags.get("is_sobreaviso"):
+                event_type = "SOBREAVISO"
             event_url = special_flags.get("reservation_url")
             
             # Phase 5: Insert into processed_events
@@ -440,11 +560,19 @@ def process_raw_events(conn, user_id):
         except Exception as e:
             logger.error(f"Failed to process event {source_uid}: {e}", exc_info=True)
             stats["skipped"] += 1
-    
+
+    stats["deleted_standby_conflicts"] = cleanup_standby_report_time_conflicts(cur, user_id)
+
     # Commit all changes
     conn.commit()
     
-    logger.info(f"init_parsing complete: processed={stats['processed']}, deleted={stats['deleted']}, skipped={stats['skipped']}")
+    logger.info(
+        "init_parsing complete: "
+        f"processed={stats['processed']}, "
+        f"deleted={stats['deleted']}, "
+        f"skipped={stats['skipped']}, "
+        f"deleted_standby_conflicts={stats['deleted_standby_conflicts']}"
+    )
     return stats
 
 
