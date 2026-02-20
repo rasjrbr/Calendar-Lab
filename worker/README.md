@@ -1,18 +1,41 @@
-# Calendar Lab Worker
+# Calendar Lab
 
-Calendar Lab Worker ingests an ICS calendar, normalizes events in PostgreSQL, and publishes a processed ICS output.
+Calendar Lab is a Docker-based pipeline that ingests an ICS calendar, applies custom parsing/normalization rules, and republishes a processed ICS feed.
 
-## What It Does
+## Components
 
-- Pulls source events from `SOURCE_ICS_URL` into `raw_events`.
-- Applies parsing rules to generate `processed_events`.
-- Creates synthetic workflow events like `Checkout` and duty-limit markers.
-- Removes day-off events based on config.
-- Publishes final output as `OUT_DIR/{USER_ID}.ics`.
+- `postgres`: stores raw and processed calendar events.
+- `worker`: runs ingestion/parsing/publishing Python jobs.
+- `nginx`: serves generated ICS files.
 
-## Main Pipeline
+Main paths:
+- `worker/`: pipeline code.
+- `docs/`: architecture and cookbook notes.
+- `docker-compose.yaml`: local orchestration.
 
-Default loop in `worker_loop.py` runs every `INTERVAL_SECONDS` (default: 600):
+## Quick Start
+
+From repo root:
+
+```bash
+docker compose up -d --build
+```
+
+Check status:
+
+```bash
+docker compose ps
+```
+
+View worker logs:
+
+```bash
+docker compose logs -f worker
+```
+
+## Processing Flow
+
+The default worker loop (`worker/worker_loop.py`) runs:
 
 1. `ingest_ics.py` (if `SOURCE_ICS_URL` is set)
 2. `init_parsing.py`
@@ -20,86 +43,20 @@ Default loop in `worker_loop.py` runs every `INTERVAL_SECONDS` (default: 600):
 4. `dayoff_parsing.py`
 5. `publish_ics.py`
 
-Optional/manual stages:
+Optional/manual stages include:
 - `activity_processor.py`
 - `location_processor.py`
 - `dtl-singlecrew.py`
 - `dtl-sc-ext.py`
 
-## Project Layout
+## Output
 
-- `ingest_ics.py`: ICS ingestion into `raw_events`.
-- `init_parsing.py`: first normalization stage and core business rules.
-- `checkout_creator.py`: synthetic `Checkout` generation.
-- `dayoff_parsing.py`: day-off filtering.
-- `dtl-singlecrew.py`: duty limit markers.
-- `dtl-sc-ext.py`: duty extension markers.
-- `publish_ics.py`: final ICS generation.
-- `schema.sql`: PostgreSQL schema.
-- `utils/`: DB, logging, timezone, notes helpers.
-- `config/`: lookup JSON files.
+Generated calendars are written to `/var/www/calendars/{USER_ID}.ics` inside containers and served by nginx.
 
-## Quick Start (Docker Compose)
+## Documentation
 
-From repository root (one level above this folder):
+- Worker-focused guide: `worker/README.md`
+- Detailed internal reference: `worker/AGENT.md`
+- Architecture notes: `docs/ARCHITECTURE.md`
+- Usage examples: `docs/COOKBOOK.md`
 
-```bash
-docker compose up -d --build
-```
-
-Check service status:
-
-```bash
-docker compose ps
-```
-
-Tail worker logs:
-
-```bash
-docker compose logs -f worker
-```
-
-## Manual Run
-
-Run a full one-shot processing pass:
-
-```bash
-docker compose exec -T worker sh -lc \
-'python /app/init_parsing.py && \
- python /app/checkout_creator.py && \
- python /app/dayoff_parsing.py && \
- python /app/dtl-singlecrew.py && \
- python /app/dtl-sc-ext.py && \
- python /app/publish_ics.py'
-```
-
-## Key Environment Variables
-
-| Variable | Default | Purpose |
-|---|---|---|
-| `USER_ID` | `roque` | Tenant/user key used in DB rows and output filename |
-| `SOURCE_ICS_URL` | unset | Input ICS feed URL (`webcal://` supported) |
-| `INTERVAL_SECONDS` | `600` | Loop interval in seconds |
-| `OUT_DIR` | `/var/www/calendars` | Output directory for generated ICS |
-| `DB_HOST` | `postgres` | PostgreSQL host |
-| `DB_NAME` | `calendardb` | PostgreSQL DB name |
-| `DB_USER` | `calendar` | PostgreSQL username |
-| `DB_PASSWORD` | `calendarpass` | PostgreSQL password |
-| `SOURCE_TZ` | `America/Sao_Paulo` | Source timezone for floating datetimes |
-
-## Data Model (High Level)
-
-- `raw_events`: source mirror + ingestion flags.
-- `processed_events`: normalized and synthetic events used for publishing.
-- `lookup_*`: reference tables.
-- `*_pending_validation`: unknown activity/homebase queues.
-
-## Notes and Metadata
-
-Rules append roquescript metadata blocks into notes using:
-- marker: `[--#roquescript-info-below-]`
-- tags like `#roquescript-modified` and `#roquescript-created`.
-
-## Additional Technical Reference
-
-See `AGENT.md` for a deeper technical description, including a full `init_parsing.py` walkthrough and rule behavior.

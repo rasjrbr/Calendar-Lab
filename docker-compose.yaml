@@ -34,7 +34,6 @@ services:
       DB_PASSWORD: calendarpass
       USER_ID: roque
       SOURCE_ICS_URL: webcal://crewmember-ics-from-iflight-calendar-public-link
-      INTERVAL_SECONDS: 600
       OUT_DIR: /var/www/calendars
     volumes:
       - ./worker:/app
