@@ -15,7 +15,16 @@ Main paths:
 
 ## Quick Start
 
-From repo root:
+Prerequisites:
+
+1. Create a public iFlight calendar WebCal link for the crewmember calendar.
+2. Set `SOURCE_ICS_URL` in `docker-compose.yaml` to that link format:
+
+```yaml
+SOURCE_ICS_URL: webcal://crewmember-ics-from-iflight-calendar-public-link
+```
+
+From repo root, start the stack:
 
 ```bash
 docker compose up -d --build
@@ -59,4 +68,3 @@ Generated calendars are written to `/var/www/calendars/{USER_ID}.ics` inside con
 - Detailed internal reference: `worker/AGENT.md`
 - Architecture notes: `docs/ARCHITECTURE.md`
 - Usage examples: `docs/COOKBOOK.md`
-
