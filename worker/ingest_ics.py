@@ -56,14 +56,19 @@ def main():
         cal = Calendar.from_ical(ics_bytes)
         
         cur = conn.cursor()
-        count = 0
+        events_to_insert = []
         skipped = 0
+        duplicate_uid_in_feed = 0
         seen_uids = set()
         
         for ev in cal.walk("VEVENT"):
             uid = str(ev.get("UID", "")).strip()
             if not uid:
                 skipped += 1
+                continue
+            if uid in seen_uids:
+                duplicate_uid_in_feed += 1
+                logger.warning(f"Skipping duplicate UID in same ICS payload: {uid}")
                 continue
             seen_uids.add(uid)
             
@@ -95,63 +100,38 @@ def main():
                 f"{uid}|{start_utc}|{end_utc}|{summary}|{description}".encode("utf-8")
             ).hexdigest()
             
-            try:
-                cur.execute(
-                    """
-                    INSERT INTO raw_events (user_id, source_uid, start_utc, end_utc, summary, description, last_modified, raw_hash)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (user_id, source_uid)
-                    DO UPDATE SET
-                      start_utc = EXCLUDED.start_utc,
-                      end_utc = EXCLUDED.end_utc,
-                      summary = EXCLUDED.summary,
-                      description = EXCLUDED.description,
-                      last_modified = EXCLUDED.last_modified,
-                      raw_hash = EXCLUDED.raw_hash,
-                      processed_flag = FALSE
-                    """,
-                    (USER_ID, uid, start_utc, end_utc, summary, description, last_modified, raw_hash),
-                )
-                count += 1
-            except Exception as e:
-                logger.error(f"Failed to insert event {uid}: {e}")
-                skipped += 1
-        
-        # Reconcile removals from source calendar:
-        # if a UID no longer exists in the latest ICS feed, remove it locally too.
-        cur.execute(
-            "SELECT source_uid FROM raw_events WHERE user_id = %s",
-            (USER_ID,),
+            events_to_insert.append(
+                (USER_ID, uid, start_utc, end_utc, summary, description, last_modified, raw_hash)
+            )
+
+        # Full rebuild mode for deterministic output:
+        # 1) remove all current processed/raw state for the user
+        # 2) insert only rows from the latest source payload
+        cur.execute("DELETE FROM processed_events WHERE user_id = %s", (USER_ID,))
+        cleared_processed = cur.rowcount
+
+        cur.execute("DELETE FROM raw_events WHERE user_id = %s", (USER_ID,))
+        cleared_raw = cur.rowcount
+
+        cur.executemany(
+            """
+            INSERT INTO raw_events (
+                user_id, source_uid, start_utc, end_utc, summary, description, last_modified, raw_hash, processed_flag
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, FALSE)
+            """,
+            events_to_insert,
         )
-        existing_uids = {row[0] for row in cur.fetchall()}
-        removed_uids = list(existing_uids - seen_uids)
-        
-        if removed_uids:
-            synthetic_uids = [f"{uid}-checkout-synthetic" for uid in removed_uids]
-            
-            # Remove normalized/synthetic events that originated from removed source UIDs.
-            cur.execute(
-                """
-                DELETE FROM processed_events
-                WHERE user_id = %s
-                  AND (source_uid = ANY(%s) OR source_uid = ANY(%s))
-                """,
-                (USER_ID, removed_uids, synthetic_uids),
-            )
-            
-            # Remove stale raw events so they are not reintroduced.
-            cur.execute(
-                "DELETE FROM raw_events WHERE user_id = %s AND source_uid = ANY(%s)",
-                (USER_ID, removed_uids),
-            )
+        count = len(events_to_insert)
         
         conn.commit()
         cur.close()
         conn.close()
         
         logger.info(
-            f"Ingestion complete: {count} events ingested/updated, "
-            f"{skipped} skipped, {len(removed_uids)} removed-from-source"
+            f"Ingestion complete: {count} events ingested, "
+            f"{skipped} skipped, {duplicate_uid_in_feed} duplicate-uids-skipped, "
+            f"{cleared_raw} raw cleared, {cleared_processed} processed cleared"
         )
         return count
         
