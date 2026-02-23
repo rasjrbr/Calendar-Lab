@@ -1,7 +1,9 @@
 import os
 import hashlib
 import urllib.request
+import urllib.error
 import logging
+import time
 
 from icalendar import Calendar
 
@@ -14,23 +16,48 @@ logger = setup_logging(__name__)
 
 USER_ID = os.getenv("USER_ID", "roque")
 SOURCE_ICS_URL = os.getenv("SOURCE_ICS_URL")  # required
+FETCH_TIMEOUT_SECONDS = int(os.getenv("FETCH_TIMEOUT_SECONDS", "30"))
+FETCH_RETRIES = int(os.getenv("FETCH_RETRIES", "5"))
+FETCH_BACKOFF_SECONDS = float(os.getenv("FETCH_BACKOFF_SECONDS", "3"))
 
 
 def fetch_ics(url: str) -> bytes:
-    """Fetch ICS file from URL with timeout."""
+    """Fetch ICS file from URL with retries and backoff."""
     # Convert webcal:// to https://
     if url.startswith("webcal://"):
         url = url.replace("webcal://", "https://", 1)
     
     logger.info(f"Fetching ICS from {url}")
-    try:
-        with urllib.request.urlopen(url, timeout=30) as r:
-            content = r.read()
-        logger.info(f"Successfully fetched {len(content)} bytes")
-        return content
-    except Exception as e:
-        logger.error(f"Failed to fetch ICS: {e}")
-        raise
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36"
+        ),
+        "Accept": "text/calendar, text/plain, */*;q=0.8",
+        "Cache-Control": "no-cache",
+    }
+
+    last_error = None
+    for attempt in range(1, FETCH_RETRIES + 1):
+        try:
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=FETCH_TIMEOUT_SECONDS) as r:
+                content = r.read()
+            logger.info(f"Successfully fetched {len(content)} bytes")
+            return content
+        except Exception as e:
+            last_error = e
+            is_http_error = isinstance(e, urllib.error.HTTPError)
+            status = f"HTTP {e.code}" if is_http_error else type(e).__name__
+            logger.warning(
+                f"Fetch attempt {attempt}/{FETCH_RETRIES} failed ({status}): {e}"
+            )
+            if attempt < FETCH_RETRIES:
+                sleep_seconds = FETCH_BACKOFF_SECONDS * (2 ** (attempt - 1))
+                time.sleep(sleep_seconds)
+
+    logger.error(f"Failed to fetch ICS after {FETCH_RETRIES} attempts: {last_error}")
+    raise last_error
 
 
 def main():
@@ -59,7 +86,9 @@ def main():
         events_to_insert = []
         skipped = 0
         duplicate_uid_in_feed = 0
+        duplicate_content_in_feed = 0
         seen_uids = set()
+        seen_event_fingerprints = set()
         
         for ev in cal.walk("VEVENT"):
             uid = str(ev.get("UID", "")).strip()
@@ -88,6 +117,23 @@ def main():
             
             summary = str(ev.get("SUMMARY", "")).strip()
             description = str(ev.get("DESCRIPTION", "")).strip()
+
+            # Some sources emit duplicate rows with different UIDs.
+            # Keep only one canonical row per normalized content/time tuple.
+            event_fingerprint = (
+                start_utc,
+                end_utc,
+                " ".join(summary.split()).casefold(),
+                " ".join(description.split()).casefold(),
+            )
+            if event_fingerprint in seen_event_fingerprints:
+                duplicate_content_in_feed += 1
+                logger.warning(
+                    "Skipping duplicate event content in same ICS payload: "
+                    f"uid={uid} summary={summary!r} start={start_utc} end={end_utc}"
+                )
+                continue
+            seen_event_fingerprints.add(event_fingerprint)
             
             last_modified = ev.decoded("LAST-MODIFIED", None)
             if last_modified:
@@ -131,6 +177,7 @@ def main():
         logger.info(
             f"Ingestion complete: {count} events ingested, "
             f"{skipped} skipped, {duplicate_uid_in_feed} duplicate-uids-skipped, "
+            f"{duplicate_content_in_feed} duplicate-content-skipped, "
             f"{cleared_raw} raw cleared, {cleared_processed} processed cleared"
         )
         return count

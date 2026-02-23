@@ -15,6 +15,7 @@ from utils.db_utils import get_connection
 from utils.logging_utils import setup_logging
 from utils.notes_utils import append_roquescript_block, build_roquescript_block
 from utils.timezone_utils import now_utc
+from utils.pipeline_utils import intervals_overlap, load_standby_windows, apresentacao_overlaps_standby
 
 logger = setup_logging(__name__)
 
@@ -24,40 +25,6 @@ USER_ID = os.getenv("USER_ID", "roque")
 def create_synthetic_checkout_uid(apresentacao_uid):
     """Generate synthetic UID for Checkout event."""
     return f"{apresentacao_uid}-checkout-synthetic"
-
-
-def intervals_overlap(start_a, end_a, start_b, end_b):
-    """Return True when two [start, end) intervals overlap."""
-    return start_a < end_b and end_a > start_b
-
-
-def load_standby_windows(cur, user_id):
-    """Load Reserva/Sobreaviso windows to block invalid Checkout creation."""
-    cur.execute(
-        """
-        SELECT source_uid, start_utc, end_utc
-        FROM processed_events
-        WHERE user_id = %s
-          AND is_synthetic = FALSE
-          AND (
-                clean_title LIKE 'Reserva%%'
-             OR clean_title = 'Sobreaviso'
-             OR event_type IN ('RESERVA', 'SOBREAVISO')
-          )
-        """,
-        (user_id,),
-    )
-    return cur.fetchall()
-
-
-def apresentacao_overlaps_standby(source_uid, start_utc, end_utc, standby_windows):
-    """Return True if Apresentação overlaps any Reserva/Sobreaviso window."""
-    for standby_uid, standby_start, standby_end in standby_windows:
-        if standby_uid == source_uid:
-            continue
-        if intervals_overlap(start_utc, end_utc, standby_start, standby_end):
-            return True
-    return False
 
 
 def process_apresentacoes(conn, user_id):

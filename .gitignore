@@ -1,0 +1,7 @@
+newkey
+newkey.pub
+*.pem
+*.key
+.env
+.DS_Store
+.claude/

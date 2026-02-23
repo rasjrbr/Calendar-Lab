@@ -12,16 +12,15 @@ import os
 import json
 import argparse
 from datetime import datetime, timedelta, timezone
-from zoneinfo import ZoneInfo
 
 from utils.db_utils import get_connection
 from utils.logging_utils import setup_logging
 from utils.timezone_utils import now_utc
+from utils.pipeline_utils import TZ_BRT
 
 logger = setup_logging(__name__)
 
 USER_ID = os.getenv("USER_ID", "roque")
-TZ_BRT = ZoneInfo("America/Sao_Paulo")
 
 
 def brt_window_to_utc():

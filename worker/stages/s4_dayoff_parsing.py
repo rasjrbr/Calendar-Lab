@@ -18,7 +18,7 @@ logger = setup_logging(__name__)
 
 USER_ID = os.getenv("USER_ID", "roque")
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
-DAY_OFF_CODES_PATH = os.path.join(APP_DIR, "config", "day_off_codes.json")
+DAY_OFF_CODES_PATH = os.path.join(APP_DIR, "..", "config", "day_off_codes.json")
 SUPPORTED_DAYOFF_MODES = {"remove", "timed", "all_day", "keep"}
 
 

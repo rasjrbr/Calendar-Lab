@@ -21,6 +21,7 @@ from utils.db_utils import get_connection
 from utils.logging_utils import setup_logging
 from utils.notes_utils import append_roquescript_block, build_roquescript_block
 from utils.timezone_utils import now_utc
+from utils.pipeline_utils import intervals_overlap
 
 logger = setup_logging(__name__)
 
@@ -31,6 +32,10 @@ CYCLE_ID = str(uuid.uuid4())
 # Deletion rules
 DELETION_RULES = {
     "start_time_removed": lambda title: "Start Time:" in title,
+    "synthetic_title_from_source": lambda title: (
+        (title or "").strip().lower()
+        in {"checkout", "final de jornada", "horário corte (d)", "horario corte (d)", "horário corte (i)", "horario corte (i)"}
+    ),
 }
 STANDBY_KEYWORD_RE = re.compile(r"\b(ASB|HSB)\b", flags=re.IGNORECASE)
 
@@ -81,11 +86,6 @@ def check_deletion_rules(title):
             return True, reason
     
     return False, None
-
-
-def intervals_overlap(start_a, end_a, start_b, end_b):
-    """Return True when two [start, end) intervals overlap."""
-    return start_a < end_b and end_a > start_b
 
 
 def is_standby_summary(title):
@@ -408,7 +408,7 @@ def process_raw_events(conn, user_id):
         SELECT id, source_uid, start_utc, end_utc, summary, description
         FROM raw_events
         WHERE user_id = %s AND processed_flag = FALSE
-        ORDER BY start_utc
+        ORDER BY start_utc, end_utc DESC
         """,
         (user_id,)
     )
@@ -418,6 +418,7 @@ def process_raw_events(conn, user_id):
 
     standby_windows = build_standby_windows(raw_rows)
     processed_events_buffer = []  # For overlap detection
+    seen_event_keys = set()  # Deduplicate same content/time within a cycle
     
     for raw_id, source_uid, start_utc, end_utc, summary, description in raw_rows:
         try:
@@ -483,6 +484,49 @@ def process_raw_events(conn, user_id):
                 event_type = "SOBREAVISO"
             event_url = special_flags.get("reservation_url")
             
+            # Phase 4.5: Deduplicate same content/time (different UIDs)
+            # Source can emit both a long Report Time and a short synthetic-like
+            # Apresentação at the same start instant but with different UIDs/end times.
+            # Key Apresentação by start time only to keep one canonical duty chain.
+            if clean_title == "Apresentação":
+                dedupe_key = (clean_title, start_utc)
+            else:
+                dedupe_key = (clean_title, start_utc, end_utc)
+            if dedupe_key in seen_event_keys:
+                cur.execute(
+                    "UPDATE raw_events SET skip_reason = %s, processed_flag = TRUE WHERE id = %s",
+                    ("duplicate_event_content", raw_id),
+                )
+                delete_event_and_related_synthetics(cur, user_id, source_uid)
+                stats["skipped"] += 1
+                logger.info(f"Event {source_uid}: SKIPPED (duplicate_event_content)")
+                continue
+            seen_event_keys.add(dedupe_key)
+
+            # Phase 4.6: Deduplicate against existing processed_events across cycles
+            cur.execute(
+                """
+                SELECT 1
+                FROM processed_events
+                WHERE user_id = %s
+                  AND is_synthetic = FALSE
+                  AND clean_title = %s
+                  AND start_utc = %s
+                  AND end_utc = %s
+                LIMIT 1
+                """,
+                (user_id, clean_title, start_utc, end_utc),
+            )
+            if cur.fetchone():
+                cur.execute(
+                    "UPDATE raw_events SET skip_reason = %s, processed_flag = TRUE WHERE id = %s",
+                    ("duplicate_event_existing", raw_id),
+                )
+                delete_event_and_related_synthetics(cur, user_id, source_uid)
+                stats["skipped"] += 1
+                logger.info(f"Event {source_uid}: SKIPPED (duplicate_event_existing)")
+                continue
+
             # Phase 5: Insert into processed_events
             activity_code = special_flags.get("activity_code")
             location_code = special_flags.get("location_code")

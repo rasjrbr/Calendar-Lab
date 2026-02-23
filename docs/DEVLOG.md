@@ -51,3 +51,28 @@
   - `Checkout`
   - `Horário Corte (d)`
   - `Final de Jornada`
+
+# 2026-02-23
+
+## Duplicate Chain Fix: Apresentacao -> Checkout -> Duty Markers
+
+- Root cause identified: duplicated non-synthetic `Apresentação` events with different `source_uid` values were being accepted, which generated duplicated synthetic chains (`Checkout`, `Horário Corte`, `Final de Jornada`).
+- Updated `worker/init_parsing.py` with cross-cycle deduplication:
+  - New guard skips insertion when a non-synthetic event already exists for the same `(clean_title, start_utc, end_utc)`.
+  - New `raw_events.skip_reason`: `duplicate_event_existing`.
+- Kept same-cycle dedupe in place (`duplicate_event_content`) and source synthetic-title deletion rule in place.
+
+## Data Cleanup and Regeneration
+
+- Removed existing duplicated rows in `processed_events` for `roque` based on repeated non-synthetic `(clean_title, start_utc, end_utc)`, including synthetic children tied to removed source UIDs.
+- Re-ran pipeline stages:
+  1. `checkout_creator.py`
+  2. `dayoff_parsing.py`
+  3. `dtl-singlecrew.py`
+  4. `dtl-hsb-rulecheck.py`
+  5. `publish_ics.py`
+
+## Verification
+
+- Post-cleanup query returned zero duplicates for non-synthetic events grouped by `(clean_title, start_utc, end_utc)`.
+- Repeated synthetic markers now correlate to unique source duties instead of duplicate source rows.

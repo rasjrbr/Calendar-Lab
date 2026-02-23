@@ -32,8 +32,9 @@ services:
       DB_NAME: calendardb
       DB_USER: calendar
       DB_PASSWORD: calendarpass
+      INGEST_INTERVAL_SECONDS: "300"
       USER_ID: roque
-      SOURCE_ICS_URL: webcal://crewmember-ics-from-iflight-calendar-public-link
+      SOURCE_ICS_URL: webcal://p59-caldav.icloud.com/published/2/MTA0MzcyMzc5ODEwNDM3MoyXXEL-Kki2xUi5aa8RfIF6bLX4nEnZ2ANXl64dW_4jj0VjvMdN6tH-yc2Qt4bIBNuSaiAcZcvBPfhMO8bgJtA
       OUT_DIR: /var/www/calendars
     volumes:
       - ./worker:/app

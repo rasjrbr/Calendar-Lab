@@ -1,6 +1,6 @@
 # Calendar Lab Worker: Agent Guide
 
-This document summarizes the project architecture and gives a focused reference for `init_parsing.py`.
+This document summarizes the project architecture and gives a focused reference for `stages/s2_init_parsing.py`.
 
 ## 1. Project Purpose
 
@@ -22,22 +22,25 @@ Services are defined in `../docker-compose.yaml`:
 Worker image and entrypoint are in `Dockerfile` and `worker_loop.py`.
 
 Default loop interval:
-- `INTERVAL_SECONDS=600` (10 minutes) unless overridden by environment.
+- `INTERVAL_SECONDS=20` seconds unless overridden by environment.
+- Ingest cadence is independent: `INGEST_INTERVAL_SECONDS=600` (10 minutes) by default.
 
 ## 3. Current Automated Pipeline (worker_loop.py)
 
 Every loop, the container runs:
-1. `ingest_ics.py` (only if `SOURCE_ICS_URL` is set)
-2. `init_parsing.py`
-3. `checkout_creator.py`
-4. `dayoff_parsing.py`
-5. `publish_ics.py`
+1. `stages/s1_ingest_ics.py` (only if `SOURCE_ICS_URL` is set)
+2. `stages/s2_init_parsing.py`
+3. `stages/s3_checkout_creator.py`
+4. `stages/s4_dayoff_parsing.py`
+5. `stages/s5_dtl_singlecrew.py`
+6. `stages/s6_dtl_hsb_rulecheck.py`
+7. `stages/s7_publish_ics.py`
 
-Not currently in the default loop (manual/on-demand):
+Not currently in the default loop (in `stages_optional/`):
 - `activity_processor.py`
 - `location_processor.py`
-- `dtl-singlecrew.py`
-- `dtl-sc-ext.py`
+- `dtl_sc_ext.py`
+- `overnight_check.py`
 
 ## 4. Data Model Summary
 
@@ -61,9 +64,9 @@ Auxiliary tables:
 - `*_pending_validation` queues for unknown codes.
 - `user_parsing_settings` for future day-off modes.
 
-## 5. init_parsing.py Deep Dive
+## 5. s2_init_parsing.py Deep Dive
 
-`init_parsing.py` is the first normalization stage and the most important transformation point.
+`stages/s2_init_parsing.py` is the first normalization stage and the most important transformation point.
 
 ### Input
 - Reads `raw_events` where `processed_flag = FALSE` for one `user_id`.
@@ -80,6 +83,11 @@ Auxiliary tables:
 
 ### Deletion rules
 - `Start Time:` events are deleted (`skip_reason = start_time_removed`).
+- Source-generated synthetic titles are deleted (`skip_reason = synthetic_title_from_source`):
+  - `Checkout`
+  - `Final de Jornada`
+  - `Horário Corte (d)` / `Horario Corte (d)`
+  - `Horário Corte (i)` / `Horario Corte (i)`
 
 Helper `delete_event_and_related_synthetics(...)` removes:
 - Base processed event (`source_uid`)
@@ -147,6 +155,8 @@ After modifications:
 ### Idempotency behavior
 - Uses upsert on `(user_id, source_uid)`.
 - Re-ingestion resets raw `processed_flag` for changed UIDs.
+- Deduplicates same-cycle duplicate payload rows by `(clean_title, start_utc, end_utc)` (`skip_reason = duplicate_event_content`).
+- Deduplicates cross-cycle duplicates against existing non-synthetic processed rows using the same key (`skip_reason = duplicate_event_existing`).
 - `init_parsing` is safe to rerun.
 
 ### Post-pass cleanup
@@ -156,32 +166,32 @@ This avoids stale historical conflicts.
 
 ## 6. Other Stages (Brief)
 
-### ingest_ics.py
+### s1_ingest_ics.py
 - Fetches ICS (`webcal://` converted to `https://`).
 - Inserts/updates `raw_events`.
 - Sets changed rows back to `processed_flag = FALSE`.
 - Reconciles deleted UIDs (removes stale raw + processed copies).
 
-### checkout_creator.py
+### s3_checkout_creator.py
 - Builds synthetic `Checkout` from each valid `Apresentação`.
 - Shortens `Apresentação` duration to 10 minutes.
 - Defensive guard: if Apresentação overlaps Reserva/Sobreaviso, skip checkout and delete stale checkout.
 
-### dayoff_parsing.py
+### s4_dayoff_parsing.py
 - Deletes day-off/off-at events using config + patterns.
 - Keeps scaffolding for future user-configurable dayoff modes.
 
-### dtl-singlecrew.py
+### s5_dtl_singlecrew.py
 - Computes duty limit markers (`Final de Jornada`, `Horário Corte (d/i)`).
 - Uses local BRT duty tables and leg classification.
 - Guard: skips/clears DTL markers for Apresentação overlapping Reserva/Sobreaviso.
 - Notes now follow roquescript-created format and preserve original source notes.
 
-### dtl-sc-ext.py
+### dtl_sc_ext.py (stages_optional)
 - For recent duties only (last 2 days to today), adds extension markers if checkout exceeds final duty limit.
 - Depends on existing checkout + cutoff markers.
 
-### publish_ics.py
+### s7_publish_ics.py
 - Exports all `processed_events` to final ICS.
 - Includes notes/tags in description and adds reminders:
   - Reserva: -5m
@@ -194,6 +204,7 @@ This avoids stale historical conflicts.
 - `utils/timezone_utils.py`: source timezone and UTC conversion.
 - `utils/notes_utils.py`: roquescript notes block formatting.
 - `utils/logging_utils.py`: JSON structured logs.
+- `utils/pipeline_utils.py`: shared constants and helpers (duty tables, flight regexes, overlap detection, standby window loading).
 
 ## 8. Practical Runbook
 
@@ -201,12 +212,12 @@ Manual full run in Docker:
 
 ```bash
 docker compose -f ../docker-compose.yaml exec -T worker sh -lc \
-'python /app/init_parsing.py && \
- python /app/checkout_creator.py && \
- python /app/dayoff_parsing.py && \
- python /app/dtl-singlecrew.py && \
- python /app/dtl-sc-ext.py && \
- python /app/publish_ics.py'
+'python /app/stages/s2_init_parsing.py && \
+ python /app/stages/s3_checkout_creator.py && \
+ python /app/stages/s4_dayoff_parsing.py && \
+ python /app/stages/s5_dtl_singlecrew.py && \
+ python /app/stages/s6_dtl_hsb_rulecheck.py && \
+ python /app/stages/s7_publish_ics.py'
 ```
 
 Default loop already running in `calendar_worker`:
@@ -214,5 +225,5 @@ Default loop already running in `calendar_worker`:
 
 ## 9. Current Known Design Notes
 
-- `activity_processor.py` and `location_processor.py` exist but are not in `worker_loop.py` by default.
+- `stages_optional/activity_processor.py` and `stages_optional/location_processor.py` exist but are not in the default pipeline.
 - Some older rows may still carry legacy `event_type` values (`UNKNOWN`/`ACTIVITY`) for standby titles created before newer rules; current rules now enforce `RESERVA`/`SOBREAVISO` for newly processed rows.

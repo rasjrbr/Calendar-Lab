@@ -20,18 +20,17 @@ import json
 import argparse
 from bisect import bisect_left
 from datetime import datetime, date, time, timedelta, timezone
-from zoneinfo import ZoneInfo
 
 from utils.db_utils import get_connection
 from utils.logging_utils import setup_logging
 from utils.notes_utils import append_roquescript_block, build_roquescript_block
 from utils.timezone_utils import now_utc
+from utils.pipeline_utils import TZ_BRT, to_brt
 
 logger = setup_logging(__name__)
 
 USER_ID = os.getenv("USER_ID", "roque")
 ACCLIMATIZATION_STATUS = (os.getenv("ACCLIMATIZATION_STATUS", "ACCLIMATED") or "ACCLIMATED").strip().upper()
-TZ_BRT = ZoneInfo("America/Sao_Paulo")
 
 VIOLATION_DURATION_MIN = 10
 OVERNIGHT_WINDOW_START_HOUR = 0
@@ -44,11 +43,6 @@ RESET_MIN_HOURS = 48
 MADRUGADA3_SUFFIX = " (Madrugada 3!)"
 
 FLIGHT_TITLE_RE = re.compile(r"^LA\s*\d{3,4}\s+[A-Z]{3}\s*-\s*[A-Z]{3}$", re.IGNORECASE)
-
-
-def to_brt(utc_naive: datetime) -> datetime:
-    """Convert naive UTC datetime (DB) to aware BRT datetime."""
-    return utc_naive.replace(tzinfo=timezone.utc).astimezone(TZ_BRT)
 
 
 def fmt_brt(utc_naive: datetime) -> str:
