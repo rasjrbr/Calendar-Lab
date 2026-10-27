@@ -11,7 +11,7 @@ Calendar Lab turns the iFlightNeo roster into a clean, enriched calendar with du
 |---|---|---|
 | Home | [Início](https://rasjrbr.github.io/Calendar-Lab/) | [Home](https://rasjrbr.github.io/Calendar-Lab/en/) |
 | Privacy Policy (LGPD) | [Política de Privacidade](https://rasjrbr.github.io/Calendar-Lab/privacidade.html) | [Privacy Policy](https://rasjrbr.github.io/Calendar-Lab/en/privacy.html) |
-| Terms of Use / EULA | [Termos de Uso](https://rasjrbr.github.io/Calendar-Lab/termos.html) | [Terms of Use](https://rasjrbr.github.io/Calendar-Lab/en/terms.html) |
+| Terms of Use | [Termos de Uso](https://rasjrbr.github.io/Calendar-Lab/termos.html) | [Terms of Use](https://rasjrbr.github.io/Calendar-Lab/en/terms.html) |
 | Support | [Suporte](https://rasjrbr.github.io/Calendar-Lab/suporte.html) | [Support](https://rasjrbr.github.io/Calendar-Lab/en/support.html) |
 
 ## Contact
